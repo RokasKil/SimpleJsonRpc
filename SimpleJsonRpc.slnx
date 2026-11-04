@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="SimpleJsonRpc.Tests/SimpleJsonRpc.Tests.csproj" />
+  <Project Path="SimpleJsonRpc/SimpleJsonRpc.csproj" />
+</Solution>
