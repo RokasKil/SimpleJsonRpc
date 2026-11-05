@@ -7,7 +7,7 @@ using Xunit.Abstractions;
 
 namespace SimpleJsonRpc.Tests;
 
-public class SimpleJsonRpcTest(ITestOutputHelper log)
+public class SimpleJsonRpcTest
 {
     [Fact]
     public void RegisterMethod_NoParameters_Succeeds()
@@ -50,7 +50,7 @@ public class SimpleJsonRpcTest(ITestOutputHelper log)
         Assert.True(rpc.IsDisposed);
         Assert.True(rpc.Completion.IsCompleted);
         JsonRpcShutdownReason shutdownReason = await rpc.Completion;
-        Assert.Equal(new(JsonRpcShutdownReasonEnum.Disposed, null), shutdownReason);
+        Assert.Equal(new(JsonRpcShutdownType.Disposed, null), shutdownReason);
     }
 
     [Fact]
@@ -65,7 +65,7 @@ public class SimpleJsonRpcTest(ITestOutputHelper log)
         Assert.True(rpc.IsDisposed);
         Assert.True(rpc.Completion.IsCompleted);
         JsonRpcShutdownReason shutdownReason = await rpc.Completion;
-        Assert.Equal(JsonRpcShutdownReasonEnum.WritingError, shutdownReason.Reason);
+        Assert.Equal(JsonRpcShutdownType.WritingError, shutdownReason.Reason);
         Assert.Equal(typeof(ObjectDisposedException), shutdownReason.Exception?.GetType());
     }
 
@@ -78,7 +78,7 @@ public class SimpleJsonRpcTest(ITestOutputHelper log)
         rpc.StartListening();
         await readStream.DisposeAsync();
         JsonRpcShutdownReason shutdownReason = await rpc.Completion.WaitAsync(new CancellationTokenSource(TimeSpan.FromSeconds(1)).Token);
-        Assert.Equal(JsonRpcShutdownReasonEnum.ListeningError, shutdownReason.Reason);
+        Assert.Equal(JsonRpcShutdownType.ListeningError, shutdownReason.Reason);
         Assert.Equal(typeof(ObjectDisposedException), shutdownReason.Exception?.GetType());
     }
 }

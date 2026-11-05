@@ -11,10 +11,14 @@ namespace SimpleJsonRpc.Tests;
 
 public class SimpleJsonRpcServerTest(ITestOutputHelper log)
 {
-    [SuppressMessage("ReSharper", "MethodSupportsCancellation")]
     private async Task ExpectedServerInputAndOutputTest(string input, string output, Action<SimpleJsonRpc>? prepareRpcAction = null)
     {
-        byte[] inputBytes = Encoding.UTF8.GetBytes(input);
+        await ExpectedServerInputAndOutputTest([input], output, prepareRpcAction);
+    }
+
+    [SuppressMessage("ReSharper", "MethodSupportsCancellation")]
+    private async Task ExpectedServerInputAndOutputTest(string[] input, string output, Action<SimpleJsonRpc>? prepareRpcAction = null)
+    {
         byte[] outputBytes = Encoding.UTF8.GetBytes(output);
         byte[] readBuffer = new byte[Math.Max(4000, outputBytes.Length)];
         ArrayBufferWriter<byte> buffer = new();
@@ -22,8 +26,12 @@ public class SimpleJsonRpcServerTest(ITestOutputHelper log)
         SimpleJsonRpc rpc = new(serverStream);
         prepareRpcAction?.Invoke(rpc);
         rpc.StartListening();
-        await clientStream.WriteAsync(inputBytes.ToArray());
-        await clientStream.FlushAsync();
+        foreach (var inputBytes in input.Select(x => Encoding.UTF8.GetBytes(x)))
+        {
+            await clientStream.WriteAsync(inputBytes.ToArray());
+            await clientStream.FlushAsync();
+        }
+
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         try
         {
@@ -207,6 +215,23 @@ public class SimpleJsonRpcServerTest(ITestOutputHelper log)
             "{\"jsonrpc\":\"2.0\",\"method\":\"badlyWrittenMethod\",\"id\":1}\n",
             "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32603,\"message\":\"Failed to serialize response\"},\"id\":1}\n",
             rpc => rpc.RegisterMethod("badlyWrittenMethod", new Func<Type>(() => typeof(TwoNumbers)))
+        );
+    }
+
+    [Fact]
+    public async Task SimpleJsonRpcServer_FracturedInput_ParsedCorrectuly()
+    {
+        await ExpectedServerInputAndOutputTest(
+            [
+                "{\"jsonrpc\":\"2.0\",\"method\":\"method\",\"id\":1}\n{\"jsonrpc\":\"2.",
+                "0\",\"method\":\"method\",\"id\":1}\n{\"jsonrpc\":\"2.0\",",
+                "\"method\":\"method\",\"id\":1}",
+                "\n"
+            ],
+            "{\"jsonrpc\":\"2.0\",\"result\":null,\"id\":1}\n" +
+            "{\"jsonrpc\":\"2.0\",\"result\":null,\"id\":1}\n" +
+            "{\"jsonrpc\":\"2.0\",\"result\":null,\"id\":1}\n",
+            rpc => rpc.RegisterMethod("method", new Action(() => { }))
         );
     }
 }

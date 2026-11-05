@@ -1,5 +1,8 @@
 ﻿namespace SimpleJsonRpc.Data;
 
+/// <summary>
+/// JSON-RPC specification defined error codes.
+/// </summary>
 public static class JsonRpcErrorCodes
 {
     public const int ParseError = -32700;

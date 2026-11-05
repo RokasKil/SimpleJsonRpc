@@ -8,7 +8,7 @@ using Xunit.Abstractions;
 
 namespace SimpleJsonRpc.Tests;
 
-public class SimpleJsonRpcSelfTest(ITestOutputHelper log)
+public class SimpleJsonRpcSelfTest
 {
     private int Sum(TwoNumbers numbers) => numbers.A + numbers.B;
 

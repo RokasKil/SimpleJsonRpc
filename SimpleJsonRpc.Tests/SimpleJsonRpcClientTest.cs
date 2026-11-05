@@ -2,8 +2,8 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Nerdbank.Streams;
-using SimpleJsonRpc.Data;
 using SimpleJsonRpc.Exceptions;
 using SimpleJsonRpc.Tests.Data;
 using Xunit.Abstractions;
@@ -195,5 +195,40 @@ public class SimpleJsonRpcClientTest(ITestOutputHelper log)
         );
         Assert.True(resultTask.IsFaulted);
         Assert.Equal(typeof(NotSupportedException), resultTask.Exception.GetBaseException().GetType());
+    }
+
+    [Fact]
+    public async Task SimpleJsonRpcClient_RequestWithCustomJsonSerializationOptions_SerializesAndDeserializesSuccessfully()
+    {
+        Type result = await ExpectedClientInputAndOutputTest(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"method\",\"params\":\"System.String\",\"id\":0}\n",
+            "{\"jsonrpc\":\"2.0\",\"result\":\"System.String\",\"id\":0}\n",
+            rpc => Task.Run(() => rpc.Request<Type>("method", typeof(string))),
+            rpc => rpc.JsonOptions.Converters.Add(new TypeConverterFactory())
+        ).Result;
+        Assert.Equal(typeof(string), result);
+    }
+
+    private class TypeConverterFactory : JsonConverterFactory
+    {
+        public override bool CanConvert(Type typeToConvert) => typeof(Type).IsAssignableFrom(typeToConvert);
+
+        public override JsonConverter CreateConverter(Type typeToConvert, JsonSerializerOptions options) => new TypeConverter();
+    }
+
+    private class TypeConverter : JsonConverter<Type>
+    {
+        public override Type Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            var value = reader.GetString();
+            if (value == "System.String")
+                return typeof(string);
+            throw new NotSupportedException();
+        }
+
+        public override void Write(Utf8JsonWriter writer, Type value, JsonSerializerOptions options)
+        {
+            writer.WriteStringValue(value.ToString());
+        }
     }
 }

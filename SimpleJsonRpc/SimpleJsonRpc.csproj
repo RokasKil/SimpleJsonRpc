@@ -4,6 +4,11 @@
         <TargetFramework>net10.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <Title>SimpleJsonRpc</Title>
+        <Authors>Rokas</Authors>
+        <PackageProjectUrl>https://github.com/RokasKil/SimpleJsonRpc</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/RokasKil/SimpleJsonRpc</RepositoryUrl>
     </PropertyGroup>
     <ItemGroup>
         <InternalsVisibleTo Include="SimpleJsonRpc.Tests"/>
