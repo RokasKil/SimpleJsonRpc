@@ -1,7 +1,8 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
     <PropertyGroup>
-        <TargetFramework>net10.0</TargetFramework>
+        <TargetFramework>net8.0</TargetFramework>
+        <Version>1.0.0.0</Version>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
@@ -9,8 +10,17 @@
         <Authors>Rokas</Authors>
         <PackageProjectUrl>https://github.com/RokasKil/SimpleJsonRpc</PackageProjectUrl>
         <RepositoryUrl>https://github.com/RokasKil/SimpleJsonRpc</RepositoryUrl>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <Description>A standalone mostly correct .NET Stream based JSON-RPC 2.0 protocol implementation.</Description>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <AnalysisLevel>latest-recommended</AnalysisLevel>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     </PropertyGroup>
     <ItemGroup>
         <InternalsVisibleTo Include="SimpleJsonRpc.Tests"/>
+    </ItemGroup>
+    <ItemGroup>
+        <None Include="../README.md" Pack="true" PackagePath="\"/>
     </ItemGroup>
 </Project>

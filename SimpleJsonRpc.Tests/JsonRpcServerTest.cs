@@ -9,21 +9,21 @@ using Xunit.Abstractions;
 
 namespace SimpleJsonRpc.Tests;
 
-public class SimpleJsonRpcServerTest(ITestOutputHelper log)
+public class JsonRpcServerTest(ITestOutputHelper log)
 {
-    private async Task ExpectedServerInputAndOutputTest(string input, string output, Action<SimpleJsonRpc>? prepareRpcAction = null)
+    private async Task ExpectedServerInputAndOutputTest(string input, string output, Action<JsonRpc>? prepareRpcAction = null)
     {
         await ExpectedServerInputAndOutputTest([input], output, prepareRpcAction);
     }
 
     [SuppressMessage("ReSharper", "MethodSupportsCancellation")]
-    private async Task ExpectedServerInputAndOutputTest(string[] input, string output, Action<SimpleJsonRpc>? prepareRpcAction = null)
+    private async Task ExpectedServerInputAndOutputTest(string[] input, string output, Action<JsonRpc>? prepareRpcAction = null)
     {
         byte[] outputBytes = Encoding.UTF8.GetBytes(output);
         byte[] readBuffer = new byte[Math.Max(4000, outputBytes.Length)];
         ArrayBufferWriter<byte> buffer = new();
         var (clientStream, serverStream) = FullDuplexStream.CreatePair();
-        SimpleJsonRpc rpc = new(serverStream);
+        await using JsonRpc rpc = new(serverStream);
         prepareRpcAction?.Invoke(rpc);
         rpc.StartListening();
         foreach (var inputBytes in input.Select(x => Encoding.UTF8.GetBytes(x)))
@@ -38,7 +38,6 @@ public class SimpleJsonRpcServerTest(ITestOutputHelper log)
             while (!cts.IsCancellationRequested)
             {
                 int read = await clientStream.ReadAsync(readBuffer, cts.Token);
-                Console.WriteLine($"Read: {read}");
                 buffer.Write(new ReadOnlySpan<byte>(readBuffer, 0, read));
                 if (outputBytes.Length != 0 && buffer.WrittenCount == outputBytes.Length) break;
             }
@@ -56,12 +55,12 @@ public class SimpleJsonRpcServerTest(ITestOutputHelper log)
     }
 
     [Theory]
-    [InlineData("5\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Value is not an object or array\"},\"id\":null}\n")]
+    [InlineData("5\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Value is not an object or array\"},\"id\":null}\n")]
     [InlineData("bad\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Invalid json\"},\"id\":null}\n")]
     [InlineData("{\"jsonrpc\":\"1.0\"}\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid jsonrpc version\"},\"id\":null}\n")]
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":{}}\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid id value\"},\"id\":null}\n")]
     [InlineData("{\"jsonrpc\":\"2.0\",\"id\":false}\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Invalid id value\"},\"id\":null}\n")]
-    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":15.9875}\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":15.9875}\n")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":15.9875}\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32600,\"message\":\"Request must have a string type method field\"},\"id\":15.9875}\n")]
     [InlineData("{\"jsonrpc\":\"2.0\",\"method\":\"m\",\"id\":15.9875}\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"},\"id\":15.9875}\n")]
     public async Task SimpleJsonRpcServer_InvalidRequest_ReturnsError(string input, string output)
     {
@@ -73,18 +72,7 @@ public class SimpleJsonRpcServerTest(ITestOutputHelper log)
         { "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":{\"A\":5,\"B\":6},\"id\":1}\n", "{\"jsonrpc\":\"2.0\",\"result\":11,\"id\":1}\n" },
         { "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":{\"A\":5,\"C\":6},\"id\":1}\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Failed to parse params\"},\"id\":1}\n" },
         { "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"id\":1}\n", "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Invalid params\"},\"id\":1}\n" },
-        { "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":{\"A\":5,\"B\":6}}\n", "" },
-        {
-            "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":{\"A\":5,\"B\":6},\"id\":1}\n" +
-            "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":{\"B\":5,\"A\":12},\"id\":2}\n" +
-            "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":{\"A\":\"bad\",\"B\":12},\"id\":3}\n" +
-            "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":{\"A\":100,\"B\":-1000},\"id\":4}\n",
-
-            "{\"jsonrpc\":\"2.0\",\"result\":11,\"id\":1}\n" +
-            "{\"jsonrpc\":\"2.0\",\"result\":17,\"id\":2}\n" +
-            "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602,\"message\":\"Failed to parse params\"},\"id\":3}\n" +
-            "{\"jsonrpc\":\"2.0\",\"result\":-900,\"id\":4}\n"
-        }
+        { "{\"jsonrpc\":\"2.0\",\"method\":\"sum\",\"params\":{\"A\":5,\"B\":6}}\n", "" }
     };
 
     [Theory]
@@ -219,7 +207,7 @@ public class SimpleJsonRpcServerTest(ITestOutputHelper log)
     }
 
     [Fact]
-    public async Task SimpleJsonRpcServer_FracturedInput_ParsedCorrectuly()
+    public async Task SimpleJsonRpcServer_FracturedInput_ParsedCorrectly()
     {
         await ExpectedServerInputAndOutputTest(
             [

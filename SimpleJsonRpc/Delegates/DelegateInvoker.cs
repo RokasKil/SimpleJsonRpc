@@ -33,7 +33,7 @@ internal static class DelegateInvoker
         }
 
         // Handle ValueTask<>
-        if (result?.GetType().IsGenericType == true && result?.GetType().GetGenericTypeDefinition() == typeof(ValueTask<>))
+        if (result?.GetType().IsGenericType == true && result.GetType().GetGenericTypeDefinition() == typeof(ValueTask<>))
         {
             MethodInfo asTaskMethod = AsTaskMethods.GetOrAdd(result.GetType(), t => t.GetMethod(nameof(ValueTask<int>.AsTask), Type.EmptyTypes)!);
             Task resultAsTask = (Task)asTaskMethod.Invoke(result, null)!;

@@ -7,34 +7,38 @@ using Xunit.Abstractions;
 
 namespace SimpleJsonRpc.Tests;
 
-public class SimpleJsonRpcTest
+public class JsonRpcTest
 {
     [Fact]
-    public void RegisterMethod_NoParameters_Succeeds()
+    public async Task RegisterMethod_NoParameters_Succeeds()
     {
-        SimpleJsonRpc rpc = new();
+        var (clientStream, serverStream) = FullDuplexStream.CreatePair();
+        await using JsonRpc rpc = new(serverStream);
         rpc.RegisterMethod("name", new Action(() => { }));
     }
 
     [Fact]
-    public void RegisterMethod_OneParameter_Succeeds()
+    public async Task RegisterMethod_OneParameter_Succeeds()
     {
-        SimpleJsonRpc rpc = new();
+        var (clientStream, serverStream) = FullDuplexStream.CreatePair();
+        await using JsonRpc rpc = new(serverStream, clientStream);
         rpc.RegisterMethod("name", new Action<int>((a) => { }));
     }
 
     [Fact]
-    public void RegisterMethod_TooManyParameters_ThrowsException()
+    public async Task RegisterMethod_TooManyParameters_ThrowsException()
     {
-        SimpleJsonRpc rpc = new();
+        var (clientStream, serverStream) = FullDuplexStream.CreatePair();
+        await using JsonRpc rpc = new(serverStream, clientStream);
         Assert.Throws<InvalidOperationException>(() => rpc.RegisterMethod("name", new Action<int, int>((a, b) => { })));
     }
 
 
     [Fact]
-    public void SimpleJsonRpc_StartListening_Succeeds()
+    public async Task SimpleJsonRpc_StartListening_Succeeds()
     {
-        SimpleJsonRpc rpc = new();
+        var (clientStream, serverStream) = FullDuplexStream.CreatePair();
+        await using JsonRpc rpc = new(serverStream, clientStream);
         rpc.StartListening();
         Assert.True(rpc.IsStarted);
         Assert.False(rpc.IsDisposed);
@@ -43,7 +47,8 @@ public class SimpleJsonRpcTest
     [Fact]
     public async Task SimpleJsonRpc_Shutdown_TaskFinishes()
     {
-        SimpleJsonRpc rpc = new();
+        var (clientStream, serverStream) = FullDuplexStream.CreatePair();
+        await using JsonRpc rpc = new(serverStream, clientStream);
         rpc.StartListening();
         Assert.True(rpc.IsStarted);
         await rpc.DisposeAsync();
@@ -56,29 +61,28 @@ public class SimpleJsonRpcTest
     [Fact]
     public async Task SimpleJsonRpc_DisposeWriteStreamAndAttemptRequest_TaskFinishesWithException()
     {
-        Stream readStream = new MemoryStream();
-        Stream writeStream = new MemoryStream();
-        SimpleJsonRpc rpc = new(readStream, writeStream);
+        var (clientStream, serverStream) = FullDuplexStream.CreatePair();
+        var (clientStream2, serverStream2) = FullDuplexStream.CreatePair();
+        await using JsonRpc rpc = new(serverStream, clientStream2);
         rpc.StartListening();
-        await writeStream.DisposeAsync();
-        await rpc.Notify("test");
+        await clientStream2.DisposeAsync();
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await rpc.Notify("test"));
         Assert.True(rpc.IsDisposed);
         Assert.True(rpc.Completion.IsCompleted);
         JsonRpcShutdownReason shutdownReason = await rpc.Completion;
         Assert.Equal(JsonRpcShutdownType.WritingError, shutdownReason.Reason);
-        Assert.Equal(typeof(ObjectDisposedException), shutdownReason.Exception?.GetType());
+        Assert.Equal(typeof(InvalidOperationException), shutdownReason.Exception?.GetType());
     }
 
     [Fact]
     public async Task SimpleJsonRpc_DisposeReadStream_TaskFinishesWithException()
     {
-        Stream readStream = new MemoryStream();
-        Stream writeStream = new MemoryStream();
-        SimpleJsonRpc rpc = new(readStream, writeStream);
+        var (clientStream, serverStream) = FullDuplexStream.CreatePair();
+        await using JsonRpc rpc = new(serverStream, clientStream);
         rpc.StartListening();
-        await readStream.DisposeAsync();
+        await serverStream.DisposeAsync();
         JsonRpcShutdownReason shutdownReason = await rpc.Completion.WaitAsync(new CancellationTokenSource(TimeSpan.FromSeconds(1)).Token);
         Assert.Equal(JsonRpcShutdownType.ListeningError, shutdownReason.Reason);
-        Assert.Equal(typeof(ObjectDisposedException), shutdownReason.Exception?.GetType());
+        Assert.Equal(typeof(InvalidOperationException), shutdownReason.Exception?.GetType());
     }
 }

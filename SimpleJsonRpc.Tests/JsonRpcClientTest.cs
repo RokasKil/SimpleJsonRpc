@@ -11,17 +11,17 @@ using Xunit.Abstractions;
 namespace SimpleJsonRpc.Tests;
 
 [SuppressMessage("Usage", "xUnit1031:Do not use blocking task operations in test method")]
-public class SimpleJsonRpcClientTest(ITestOutputHelper log)
+public class JsonRpcClientTest(ITestOutputHelper log)
 {
     [SuppressMessage("ReSharper", "MethodSupportsCancellation")]
-    private async Task<TTask> ExpectedClientInputAndOutputTest<TTask>(string input, string output, Func<SimpleJsonRpc, TTask> clientRpcMethodAction, Action<SimpleJsonRpc>? prepareRpcAction = null) where TTask : Task
+    private async Task<TTask> ExpectedClientInputAndOutputTest<TTask>(string input, string output, Func<JsonRpc, TTask> clientRpcMethodAction, Action<JsonRpc>? prepareRpcAction = null) where TTask : Task
     {
         byte[] inputBytes = Encoding.UTF8.GetBytes(input);
         byte[] outputBytes = Encoding.UTF8.GetBytes(output);
         byte[] readBuffer = new byte[Math.Max(4000, inputBytes.Length)];
         ArrayBufferWriter<byte> buffer = new();
         var (clientStream, serverStream) = FullDuplexStream.CreatePair();
-        SimpleJsonRpc rpc = new(clientStream);
+        await using JsonRpc rpc = new(clientStream);
         prepareRpcAction?.Invoke(rpc);
         rpc.StartListening();
         TTask rpcTask = clientRpcMethodAction.Invoke(rpc);
@@ -39,10 +39,10 @@ public class SimpleJsonRpcClientTest(ITestOutputHelper log)
         {
         }
 
-        string recievedLine = Encoding.UTF8.GetString(buffer.WrittenSpan);
+        string receivedLine = Encoding.UTF8.GetString(buffer.WrittenSpan);
         log.WriteLine($"Input Expected: '{input.ReplaceLineEndings("\\n")}'");
-        log.WriteLine($"Input Got:      '{recievedLine.ReplaceLineEndings("\\n")}'");
-        Assert.Equal(input, recievedLine);
+        log.WriteLine($"Input Got:      '{receivedLine.ReplaceLineEndings("\\n")}'");
+        Assert.Equal(input, receivedLine);
         if (outputBytes.Length != 0)
         {
             await serverStream.WriteAsync(outputBytes);
@@ -88,7 +88,7 @@ public class SimpleJsonRpcClientTest(ITestOutputHelper log)
     }
 
     [Fact]
-    public async Task SimpleJsonRpcClient_MultipleRequestsWithShuffledRespones_TaskReturnsResult()
+    public async Task SimpleJsonRpcClient_MultipleRequestsWithShuffledResponses_TaskReturnsResult()
     {
         int[] result = await ExpectedClientInputAndOutputTest(
             "{\"jsonrpc\":\"2.0\",\"method\":\"method\",\"id\":0}\n" +

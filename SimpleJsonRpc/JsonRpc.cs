@@ -1,7 +1,5 @@
-﻿using System.Buffers;
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Reflection;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SimpleJsonRpc.Data;
@@ -14,9 +12,9 @@ namespace SimpleJsonRpc;
 /// <summary>
 /// A joint server and client implementation of the JSON-RPC protocol
 /// </summary>
-public class SimpleJsonRpc : IAsyncDisposable
+public sealed class JsonRpc : IAsyncDisposable
 {
-    private static readonly string JsonRpcVersion = "2.0";
+    private const string JsonRpcVersion = "2.0";
     /// <summary>
     /// A task that completes when the instance is shutdown, returns the reason.
     /// </summary>
@@ -24,15 +22,20 @@ public class SimpleJsonRpc : IAsyncDisposable
     /// <summary>
     /// Has the instance been started by a call to <see cref="StartListening"/>.
     /// </summary>
-    public bool IsStarted { get; private set; }
+    public bool IsStarted => Volatile.Read(ref _started) == 1;
     /// <summary>
     /// Has the instance been disposed, could be set because of a call to <see cref="DisposeAsync"/> or by a communication error.
     /// </summary>
-    public bool IsDisposed { get; private set; }
+    public bool IsDisposed => Volatile.Read(ref _disposed) == 1;
     /// <summary>
-    /// <see cref="JsonSerializerOptions"/> passed to all serialization and deserialization calls.
+    /// <see cref="JsonSerializerOptions"/> passed to all serialization and deserialization calls. Becomes read-only on first use.
     /// </summary>
     public JsonSerializerOptions JsonOptions => _options;
+    /// <summary>
+    /// Event triggered on various internal errors.
+    /// </summary>
+    public event EventHandler<JsonRpcErrorEventArgs>? Error;
+
 
     private readonly ConcurrentDictionary<int, PendingRequest> _requests = new();
     private int _id = -1;
@@ -40,22 +43,29 @@ public class SimpleJsonRpc : IAsyncDisposable
     private readonly ConcurrentDictionary<string, JsonRpcMethod> _methods = new();
     private readonly Stream _readStream;
     private readonly Stream _writeStream;
-    private readonly TaskCompletionSource<JsonRpcShutdownReason> _completionSource = new();
+    private readonly TaskCompletionSource<JsonRpcShutdownReason> _completionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _cts = new();
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly JsonSerializerOptions _options = new();
-    private readonly IJsonRpcFrameHandler _frameHandler;
-
-    internal SimpleJsonRpc() : this(new MemoryStream())
+    private JsonSerializerOptions? _writeOptions;
+    private JsonSerializerOptions WriteOptions
     {
+        get
+        {
+            _writeOptions ??= new JsonSerializerOptions(_options) { WriteIndented = false };
+            return _writeOptions;
+        }
     }
+    private readonly IJsonRpcFrameHandler _frameHandler;
+    private int _disposed;
+    private int _started;
 
     /// <summary>
     /// Instantiate an instance with one stream for both listening and writing.
     /// </summary>
     /// <param name="stream">Stream to use for listening and writing.</param>
     /// <param name="frameHandler">Handler to use for message framing, defaults to <see cref="JsonRpcNewLineDelimiterFrameHandler"/>.</param>
-    public SimpleJsonRpc(Stream stream, IJsonRpcFrameHandler? frameHandler = null) : this(stream, stream, frameHandler)
+    public JsonRpc(Stream stream, IJsonRpcFrameHandler? frameHandler = null) : this(stream, stream, frameHandler)
     {
     }
 
@@ -65,8 +75,10 @@ public class SimpleJsonRpc : IAsyncDisposable
     /// <param name="readStream">Stream to use for listening.</param>
     /// <param name="writeStream">Stream to use for writing.</param>
     /// <param name="frameHandler">Handler to use for message framing, defaults to <see cref="JsonRpcNewLineDelimiterFrameHandler"/>.</param>
-    public SimpleJsonRpc(Stream readStream, Stream writeStream, IJsonRpcFrameHandler? frameHandler = null)
+    public JsonRpc(Stream readStream, Stream writeStream, IJsonRpcFrameHandler? frameHandler = null)
     {
+        ArgumentNullException.ThrowIfNull(readStream);
+        ArgumentNullException.ThrowIfNull(writeStream);
         _readStream = readStream;
         _writeStream = writeStream;
         _frameHandler = frameHandler ?? new JsonRpcNewLineDelimiterFrameHandler();
@@ -80,9 +92,8 @@ public class SimpleJsonRpc : IAsyncDisposable
     /// <exception cref="ObjectDisposedException">The current instance has already been disposed.</exception>
     public void StartListening()
     {
-        if (IsDisposed) throw new ObjectDisposedException(nameof(SimpleJsonRpc));
-        if (IsStarted) throw new InvalidOperationException("Already listening");
-        IsStarted = true;
+        ObjectDisposedException.ThrowIf(IsDisposed, nameof(JsonRpc));
+        if (Interlocked.Exchange(ref _started, 1) == 1) throw new InvalidOperationException("Already listening");
         Task.Run(ListenAsync);
     }
 
@@ -110,7 +121,8 @@ public class SimpleJsonRpc : IAsyncDisposable
     /// <exception cref="JsonException"><typeparamref name="TResult"/> is not compatible with the JSON.</exception>
     public async Task<TResult> Request<TResult>(string methodName, object? param = null, CancellationToken cancellationToken = default)
     {
-        if (IsDisposed) throw new ObjectDisposedException(nameof(SimpleJsonRpc));
+        ArgumentNullException.ThrowIfNull(methodName);
+        ObjectDisposedException.ThrowIf(IsDisposed, nameof(JsonRpc));
         if (!IsStarted) throw new InvalidOperationException("Not listening yet, call StartListening() first");
         var id = Interlocked.Increment(ref _id);
         PendingRequest<TResult> pendingRequest = new();
@@ -118,7 +130,7 @@ public class SimpleJsonRpc : IAsyncDisposable
         try
         {
             await SendRequest(methodName, param, id).ConfigureAwait(false);
-            cancellationToken.Register(() => pendingRequest.CompletionSource.TrySetCanceled(cancellationToken));
+            await using var registration = cancellationToken.Register(() => pendingRequest.SetCancelled(cancellationToken));
             return await pendingRequest.CompletionSource.Task.ConfigureAwait(false);
         }
         finally
@@ -134,17 +146,17 @@ public class SimpleJsonRpc : IAsyncDisposable
     /// <param name="param">An optional object that will be serialized as the request's "params" field.</param>
     /// <exception cref="InvalidOperationException">Method has been called before <see cref="StartListening"/></exception>
     /// <exception cref="NotSupportedException">There is no compatible JsonConverter for <paramref name="param"/> or its serializable members.</exception>
-    /// <exception cref="OperationCanceledException">The cancellation token was canceled. This exception is stored into the returned task.</exception>
     /// <exception cref="ObjectDisposedException">The current instance has already been disposed.</exception>
     public async Task Notify(string methodName, object? param = null)
     {
-        if (IsDisposed) throw new ObjectDisposedException(nameof(SimpleJsonRpc));
+        ArgumentNullException.ThrowIfNull(methodName);
+        ObjectDisposedException.ThrowIf(IsDisposed, nameof(JsonRpc));
         if (!IsStarted) throw new InvalidOperationException("Not listening yet, call StartListening() first");
         await SendRequest(methodName, param).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Register a JSON-RPC method.
+    /// Register a JSON-RPC method. Requests are processed in tasks that may be nonsequential.
     /// <list type="bullet">
     ///   <item><description>Delegate must have at most 1 parameter.</description></item>
     ///   <item><description>If parameter exists it must be a json deserializable type</description></item>
@@ -160,6 +172,8 @@ public class SimpleJsonRpc : IAsyncDisposable
     /// <exception cref="InvalidOperationException">Delegate has more than one parameter</exception>
     public void RegisterMethod(string methodName, Delegate @delegate)
     {
+        ArgumentNullException.ThrowIfNull(methodName);
+        ArgumentNullException.ThrowIfNull(@delegate);
         ParameterInfo[] parameters = @delegate.Method.GetParameters();
         if (parameters.Length > 1)
             throw new InvalidOperationException("Delegate must have 1 or 0 parameters");
@@ -168,7 +182,7 @@ public class SimpleJsonRpc : IAsyncDisposable
     }
 
     /// <summary>
-    /// Stops listening, disposes the backing stream and faults all pending requests with <see cref="ObjectDisposedException"/>.
+    /// Stops listening, disposes the backing stream and faults all pending requests with <see cref="JsonRpcConnectionClosedException"/>.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -176,32 +190,53 @@ public class SimpleJsonRpc : IAsyncDisposable
         await Shutdown(JsonRpcShutdownType.Disposed).ConfigureAwait(false);
     }
 
-    protected async ValueTask Shutdown(JsonRpcShutdownType reason, Exception? exception = null)
+    private async ValueTask Shutdown(JsonRpcShutdownType reason, Exception? exception = null)
     {
-        if (IsDisposed) return;
-        IsDisposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+        JsonRpcShutdownReason shutdownReason = new(reason, exception);
         await _cts.CancelAsync().ConfigureAwait(false);
-        await _readStream.DisposeAsync().ConfigureAwait(false);
-        await _writeStream.DisposeAsync().ConfigureAwait(false);
+        _writeLock.Dispose();
+        try
+        {
+            await _readStream.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            //ignored
+        }
+
+        try
+        {
+            await _writeStream.DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            //ignored
+        }
+
         foreach (var request in _requests.Values)
         {
-            request.SetException(new ObjectDisposedException(nameof(SimpleJsonRpc)));
+            request.SetException(new JsonRpcConnectionClosedException(shutdownReason));
         }
 
         _completionSource.SetResult(new JsonRpcShutdownReason(reason, exception));
     }
 
-    protected async Task ListenAsync()
+    private async Task ListenAsync()
     {
         try
         {
             byte[] readBuffer = new byte[1024];
             while (!_cts.IsCancellationRequested)
             {
-                int read = await _readStream.ReadAtLeastAsync(readBuffer, 1, false, _cts.Token).ConfigureAwait(false);
-                _frameHandler.IngestData(readBuffer, read);
+                int read = await _readStream.ReadAtLeastAsync(readBuffer, 1, cancellationToken: _cts.Token).ConfigureAwait(false);
+                _frameHandler.IngestData(new ReadOnlySpan<byte>(readBuffer, 0, read));
                 while (_frameHandler.TryGetMessage(out var message)) await HandleMessage(message).ConfigureAwait(false);
             }
+        }
+        catch (EndOfStreamException ex)
+        {
+            await Shutdown(JsonRpcShutdownType.RemoteClosed, ex).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -209,7 +244,7 @@ public class SimpleJsonRpc : IAsyncDisposable
         }
     }
 
-    protected async Task HandleMessage(byte[] body)
+    private async Task HandleMessage(byte[] body)
     {
         JsonElement request;
         try
@@ -217,21 +252,24 @@ public class SimpleJsonRpc : IAsyncDisposable
             using JsonDocument doc = JsonDocument.Parse(body);
             request = doc.RootElement.Clone();
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
             await SendError(new(JsonRpcErrorCodes.ParseError, "Invalid json")).ConfigureAwait(false);
+            RaiseError(new(JsonRpcErrorType.RequestInvalid, exception: ex));
             return;
         }
 
         if (request.ValueKind == JsonValueKind.Array)
         {
             await SendError(new(JsonRpcErrorCodes.InternalError, "Batches are not supported by this server")).ConfigureAwait(false);
+            RaiseError(new(JsonRpcErrorType.RequestUnsupportedBatch, request));
             return;
         }
 
         if (request.ValueKind != JsonValueKind.Object)
         {
-            await SendError(new(JsonRpcErrorCodes.ParseError, "Value is not an object or array")).ConfigureAwait(false);
+            await SendError(new(JsonRpcErrorCodes.InvalidRequest, "Value is not an object or array")).ConfigureAwait(false);
+            RaiseError(new(JsonRpcErrorType.RequestInvalid, request));
             return;
         }
 
@@ -241,6 +279,7 @@ public class SimpleJsonRpc : IAsyncDisposable
         if (error != null)
         {
             await SendError(error, id).ConfigureAwait(false);
+            RaiseError(new(JsonRpcErrorType.RequestInvalid, request));
             return;
         }
 
@@ -250,26 +289,50 @@ public class SimpleJsonRpc : IAsyncDisposable
         }
         else
         {
-            await HandleRequest(request, id).ConfigureAwait(false);
+            _ = Task.Run(async () => await HandleRequestSafe(request, id).ConfigureAwait(false));
         }
     }
 
-    protected async Task HandleRequest(JsonElement request, JsonElement? id)
+    private async Task HandleRequestSafe(JsonElement request, JsonElement? id)
+    {
+        try
+        {
+            await HandleRequest(request, id).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!IsDisposed)
+        {
+            RaiseError(new(JsonRpcErrorType.InternalError, request, exception: ex));
+        }
+        catch
+        {
+            // ignored
+        }
+    }
+
+    private async Task HandleRequest(JsonElement request, JsonElement? id)
     {
         // get method
-        if (!(request.TryGetProperty("method", out var methodElement) && methodElement.ValueKind == JsonValueKind.String && _methods.ContainsKey(methodElement.GetString()!)))
+        if (!request.TryGetProperty("method", out var methodElement) || methodElement.ValueKind != JsonValueKind.String)
         {
-            await SendErrorResponse(new(JsonRpcErrorCodes.MethodNotFound, "Method not found"), id).ConfigureAwait(false);
+            await SendErrorResponse(new(JsonRpcErrorCodes.InvalidRequest, "Request must have a string type method field"), id).ConfigureAwait(false);
+            RaiseError(new(JsonRpcErrorType.RequestWithInvalidMethodField, request));
             return;
         }
 
-        JsonRpcMethod method = _methods[request.GetProperty("method").GetString()!];
+        if (!_methods.TryGetValue(methodElement.GetString()!, out var method))
+        {
+            await SendErrorResponse(new(JsonRpcErrorCodes.MethodNotFound, "Method not found"), id).ConfigureAwait(false);
+            RaiseError(new(JsonRpcErrorType.RequestWithUnknownMethod, request, methodElement.GetString()!));
+            return;
+        }
+
         object?[] paramArray = [];
         if (method.ParamsType != null)
         {
             if (!request.TryGetProperty("params", out var parameters))
             {
                 await SendErrorResponse(new(JsonRpcErrorCodes.InvalidParams, "Invalid params"), id).ConfigureAwait(false);
+                RaiseError(new(JsonRpcErrorType.RequestWithInvalidParams, request, method.Name));
                 return;
             }
 
@@ -277,9 +340,10 @@ public class SimpleJsonRpc : IAsyncDisposable
             {
                 paramArray = [parameters.Deserialize(method.ParamsType, options: _options)];
             }
-            catch (JsonException)
+            catch (Exception ex)
             {
                 await SendErrorResponse(new(JsonRpcErrorCodes.InvalidParams, "Failed to parse params"), id).ConfigureAwait(false);
+                RaiseError(new(JsonRpcErrorType.RequestWithInvalidParams, request, method.Name, ex));
                 return;
             }
         }
@@ -287,7 +351,7 @@ public class SimpleJsonRpc : IAsyncDisposable
         object? result;
         try
         {
-            result = await DelegateInvoker.InvokeAsync(method.Delegate, paramArray);
+            result = await DelegateInvoker.InvokeAsync(method.Delegate, paramArray).ConfigureAwait(false);
         }
         catch (JsonRpcRequestException ex)
         {
@@ -295,16 +359,18 @@ public class SimpleJsonRpc : IAsyncDisposable
             {
                 await SendErrorResponse(ex.Error, id).ConfigureAwait(false);
             }
-            catch (NotSupportedException)
+            catch (Exception parseEx) when (parseEx is NotSupportedException or JsonException or ArgumentException)
             {
                 await SendErrorResponse(new(JsonRpcErrorCodes.InternalError, "Failed to serialize application error"), id).ConfigureAwait(false);
+                RaiseError(new(JsonRpcErrorType.RequestFailedToSerializeResponseError, request, method.Name, parseEx));
             }
 
             return;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             await SendErrorResponse(new(JsonRpcErrorCodes.InternalError, "Failed to execute method"), id).ConfigureAwait(false);
+            RaiseError(new(JsonRpcErrorType.RequestFailedToExecuteMethod, request, method.Name, ex));
             return;
         }
 
@@ -313,17 +379,23 @@ public class SimpleJsonRpc : IAsyncDisposable
         {
             await SendResponse(result, id).ConfigureAwait(false);
         }
-        catch (NotSupportedException)
+        catch (Exception ex) when (ex is NotSupportedException or JsonException or ArgumentException)
         {
             await SendErrorResponse(new(JsonRpcErrorCodes.InternalError, "Failed to serialize response"), id).ConfigureAwait(false);
+            RaiseError(new(JsonRpcErrorType.RequestFailedToSerializeResponseResult, request, method.Name, ex));
         }
     }
 
-    protected void HandleResponse(JsonElement response, JsonElement? id)
+    private void HandleResponse(JsonElement response, JsonElement? id)
     {
-        if (id == null) return;
-        if (id.Value.ValueKind != JsonValueKind.Number) return;
-        if (!_requests.TryGetValue(id.Value.GetInt32(), out var pendingRequest)) return;
+        if (id is not { ValueKind: JsonValueKind.Number } ||
+            !id.Value.TryGetInt32(out var idValue) ||
+            !_requests.TryGetValue(idValue, out var pendingRequest))
+        {
+            RaiseError(new(JsonRpcErrorType.ResponseWithUnknownRecipient, response));
+            return;
+        }
+
         if (response.TryGetProperty("result", out var resultElement))
         {
             try
@@ -350,13 +422,9 @@ public class SimpleJsonRpc : IAsyncDisposable
             if (error != null) pendingRequest.SetException(new JsonRpcResponseException(error));
             else pendingRequest.SetException(new JsonRpcInvalidResponseException(response));
         }
-        else
-        {
-            throw new InvalidOperationException();
-        }
     }
 
-    private JsonRpcError? ValidateRequest(JsonElement request)
+    private static JsonRpcError? ValidateRequest(JsonElement request)
     {
         if (!(request.TryGetProperty("jsonrpc", out var jsonrpc) && jsonrpc.ValueKind == JsonValueKind.String && jsonrpc.GetString() == JsonRpcVersion))
             return new(JsonRpcErrorCodes.InvalidRequest, "Invalid jsonrpc version");
@@ -365,44 +433,44 @@ public class SimpleJsonRpc : IAsyncDisposable
         return null;
     }
 
-    private JsonElement? GetId(JsonElement request)
+    private static JsonElement? GetId(JsonElement request)
     {
         if (!(request.TryGetProperty("id", out var id) && id.ValueKind is (JsonValueKind.Null or JsonValueKind.Number or JsonValueKind.String)))
             return null;
         return id;
     }
 
-    protected async Task SendErrorResponse(JsonRpcError error, JsonElement? id = null)
+    private async Task SendErrorResponse(JsonRpcError error, JsonElement? id = null)
     {
         if (id != null) await SendError(error, id).ConfigureAwait(false);
     }
 
-    protected async Task SendError(JsonRpcError error, JsonElement? id = null)
+    private async Task SendError(JsonRpcError error, JsonElement? id = null)
     {
         var message = new JsonObject
         {
             ["jsonrpc"] = JsonRpcVersion,
             ["error"] = JsonSerializer.SerializeToNode(error, error.GetType(), options: _options),
-            ["id"] = id != null ? JsonNode.Parse(id.Value.GetRawText()) : null
+            ["id"] = id != null ? JsonValue.Create(id.Value) : null
         };
 
         await Send(message, _cts.Token).ConfigureAwait(false);
     }
 
-    protected async Task SendResponse(object? result, JsonElement? id = null)
+    private async Task SendResponse(object? result, JsonElement? id = null)
     {
         if (id == null) return;
         var message = new JsonObject
         {
             ["jsonrpc"] = JsonRpcVersion,
             ["result"] = JsonSerializer.SerializeToNode(result, options: _options),
-            ["id"] = JsonNode.Parse(id.Value.GetRawText())
+            ["id"] = JsonValue.Create(id.Value)
         };
 
         await Send(message, _cts.Token).ConfigureAwait(false);
     }
 
-    protected async Task SendRequest(string method, object? param, int? id = null)
+    private async Task SendRequest(string method, object? param, int? id = null)
     {
         var message = new JsonObject
         {
@@ -415,29 +483,45 @@ public class SimpleJsonRpc : IAsyncDisposable
         await Send(message, _cts.Token).ConfigureAwait(false);
     }
 
-    protected async Task Send(JsonObject message, CancellationToken cts = default)
+    private async Task Send(JsonNode message, CancellationToken cts = default)
     {
-        byte[] data = _frameHandler.FrameMessage(
-            Encoding.UTF8.GetBytes(
-                JsonSerializer.Serialize(
-                    message,
-                    options: _options
-                )));
-
         await _writeLock.WaitAsync(cts).ConfigureAwait(false);
         try
         {
-            await _writeStream.WriteAsync(data, cts).ConfigureAwait(false);
-            await _writeStream.FlushAsync(cts).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            await Shutdown(JsonRpcShutdownType.WritingError, ex).ConfigureAwait(false);
-            return;
+            byte[] data = _frameHandler.FrameMessage(JsonSerializer.SerializeToUtf8Bytes(message, options: WriteOptions));
+
+            try
+            {
+                await _writeStream.WriteAsync(data, cts).ConfigureAwait(false);
+                await _writeStream.FlushAsync(cts).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                await Shutdown(JsonRpcShutdownType.WritingError, ex).ConfigureAwait(false);
+                throw;
+            }
         }
         finally
         {
-            _writeLock.Release();
+            try
+            {
+                _writeLock.Release();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    private void RaiseError(JsonRpcErrorEventArgs e)
+    {
+        try
+        {
+            Error?.Invoke(this, e);
+        }
+        catch
+        {
+            /* ignore subscriber exceptions */
         }
     }
 }

@@ -2,14 +2,16 @@
 
 namespace SimpleJsonRpc.Frames;
 
+/// <summary>
+/// An interface for <see cref="JsonRpc"/> transimission frame handlers.
+/// </summary>
 public interface IJsonRpcFrameHandler
 {
     /// <summary>
     /// Ingest data and internally produce messages.
     /// </summary>
-    /// <param name="data">Byte array to ingest.</param>
-    /// <param name="size">The amount of bytes to ingest.</param>
-    void IngestData(byte[] data, int size);
+    /// <param name="data">Byte Span to ingest.</param>
+    void IngestData(ReadOnlySpan<byte> data);
 
     /// <summary>
     /// Try to get a produced message in FIFO order.
