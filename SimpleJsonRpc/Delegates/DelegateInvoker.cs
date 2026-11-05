@@ -4,7 +4,7 @@ using System.Runtime.ExceptionServices;
 
 namespace SimpleJsonRpc.Delegates;
 
-internal abstract class DelegateInvoker
+internal static class DelegateInvoker
 {
     private static readonly ConcurrentDictionary<Type, PropertyInfo?> ResultProperties = new();
     private static readonly ConcurrentDictionary<Type, MethodInfo> AsTaskMethods = new();

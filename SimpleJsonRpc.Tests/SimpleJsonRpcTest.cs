@@ -46,18 +46,39 @@ public class SimpleJsonRpcTest(ITestOutputHelper log)
         SimpleJsonRpc rpc = new();
         rpc.StartListening();
         Assert.True(rpc.IsStarted);
-        await rpc.Shutdown();
+        await rpc.DisposeAsync();
         Assert.True(rpc.IsDisposed);
         Assert.True(rpc.Completion.IsCompleted);
+        JsonRpcShutdownReason shutdownReason = await rpc.Completion;
+        Assert.Equal(new(JsonRpcShutdownReasonEnum.Disposed, null), shutdownReason);
     }
 
-    #region Test class definitions
-
-    private struct TwoNumbers
+    [Fact]
+    public async Task SimpleJsonRpc_DisposeWriteStreamAndAttemptRequest_TaskFinishesWithException()
     {
-        public required int A { get; set; }
-        public required int B { get; set; }
+        Stream readStream = new MemoryStream();
+        Stream writeStream = new MemoryStream();
+        SimpleJsonRpc rpc = new(readStream, writeStream);
+        rpc.StartListening();
+        await writeStream.DisposeAsync();
+        await rpc.Notify("test");
+        Assert.True(rpc.IsDisposed);
+        Assert.True(rpc.Completion.IsCompleted);
+        JsonRpcShutdownReason shutdownReason = await rpc.Completion;
+        Assert.Equal(JsonRpcShutdownReasonEnum.WritingError, shutdownReason.Reason);
+        Assert.Equal(typeof(ObjectDisposedException), shutdownReason.Exception?.GetType());
     }
 
-    #endregion
+    [Fact]
+    public async Task SimpleJsonRpc_DisposeReadStream_TaskFinishesWithException()
+    {
+        Stream readStream = new MemoryStream();
+        Stream writeStream = new MemoryStream();
+        SimpleJsonRpc rpc = new(readStream, writeStream);
+        rpc.StartListening();
+        await readStream.DisposeAsync();
+        JsonRpcShutdownReason shutdownReason = await rpc.Completion.WaitAsync(new CancellationTokenSource(TimeSpan.FromSeconds(1)).Token);
+        Assert.Equal(JsonRpcShutdownReasonEnum.ListeningError, shutdownReason.Reason);
+        Assert.Equal(typeof(ObjectDisposedException), shutdownReason.Exception?.GetType());
+    }
 }

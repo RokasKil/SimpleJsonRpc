@@ -8,13 +8,13 @@ internal abstract class PendingRequest(Type responseType)
     public abstract void SetCancelled();
 }
 
-internal class PendingRequest<T>() : PendingRequest(typeof(T))
+internal class PendingRequest<TResult>() : PendingRequest(typeof(TResult))
 {
-    public TaskCompletionSource<T> CompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource<TResult> CompletionSource { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public override void SetResult(object? value)
     {
-        CompletionSource.TrySetResult((T)value!);
+        CompletionSource.TrySetResult((TResult)value!);
     }
 
     public override void SetException(Exception exception)

@@ -1,6 +1,6 @@
 ﻿namespace SimpleJsonRpc.Data;
 
-public class JsonRpcErrorCodes
+public static class JsonRpcErrorCodes
 {
     public const int ParseError = -32700;
     public const int InvalidRequest = -32600;

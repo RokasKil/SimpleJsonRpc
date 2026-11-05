@@ -14,7 +14,7 @@ namespace SimpleJsonRpc.Tests;
 public class SimpleJsonRpcClientTest(ITestOutputHelper log)
 {
     [SuppressMessage("ReSharper", "MethodSupportsCancellation")]
-    private async Task<T> ExpectedClientInputAndOutputTest<T>(string input, string output, Func<SimpleJsonRpc, T> clientRpcMethodAction, Action<SimpleJsonRpc>? prepareRpcAction = null) where T : Task
+    private async Task<TTask> ExpectedClientInputAndOutputTest<TTask>(string input, string output, Func<SimpleJsonRpc, TTask> clientRpcMethodAction, Action<SimpleJsonRpc>? prepareRpcAction = null) where TTask : Task
     {
         byte[] inputBytes = Encoding.UTF8.GetBytes(input);
         byte[] outputBytes = Encoding.UTF8.GetBytes(output);
@@ -24,7 +24,7 @@ public class SimpleJsonRpcClientTest(ITestOutputHelper log)
         SimpleJsonRpc rpc = new(clientStream);
         prepareRpcAction?.Invoke(rpc);
         rpc.StartListening();
-        T rpcTask = clientRpcMethodAction.Invoke(rpc);
+        TTask rpcTask = clientRpcMethodAction.Invoke(rpc);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
         try
         {
@@ -53,6 +53,16 @@ public class SimpleJsonRpcClientTest(ITestOutputHelper log)
         await clientStream.DisposeAsync();
         Assert.Equal(0, await serverStream.ReadAsync(readBuffer));
         return rpcTask;
+    }
+
+    [Fact]
+    public async Task SimpleJsonRpcClient_RequestWithoutParamsAndResponseType_TaskReturnsResult()
+    {
+        await ExpectedClientInputAndOutputTest(
+            "{\"jsonrpc\":\"2.0\",\"method\":\"method\",\"id\":0}\n",
+            "{\"jsonrpc\":\"2.0\",\"result\":null,\"id\":0}\n",
+            rpc => Task.Run(() => rpc.Request("method"))
+        );
     }
 
     [Fact]
@@ -141,7 +151,7 @@ public class SimpleJsonRpcClientTest(ITestOutputHelper log)
     }
 
     [Fact]
-    public async Task SimpleJsonRpcClient_RequestWithInvalidErrorResult_TaskFaultsWithForwardedError()
+    public async Task SimpleJsonRpcClient_RequestWithInvalidErrorResult_TaskFaultsWithInvalidResponseError()
     {
         Task<int> resultTask = await ExpectedClientInputAndOutputTest(
             "{\"jsonrpc\":\"2.0\",\"method\":\"method\",\"id\":0}\n",

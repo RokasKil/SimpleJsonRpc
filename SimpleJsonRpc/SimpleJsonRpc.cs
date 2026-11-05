@@ -1,6 +1,5 @@
 ﻿using System.Buffers;
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -15,11 +14,9 @@ public class SimpleJsonRpc : IAsyncDisposable
 {
     private static readonly string JsonRpcVersion = "2.0";
 
-    public Task Completion { get; }
+    public Task<JsonRpcShutdownReason> Completion { get; }
     public bool IsStarted { get; private set; }
     public bool IsDisposed { get; private set; }
-
-    public event EventHandler<EventArgs>? Disconnected;
 
     private readonly ConcurrentDictionary<int, PendingRequest> _requests = new();
     private int _id = -1;
@@ -27,7 +24,7 @@ public class SimpleJsonRpc : IAsyncDisposable
     private readonly ConcurrentDictionary<string, JsonRpcMethod> _methods = new();
     private readonly Stream _readStream;
     private readonly Stream _writeStream;
-    private readonly TaskCompletionSource _completionSource = new();
+    private readonly TaskCompletionSource<JsonRpcShutdownReason> _completionSource = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly byte[] _readBuffer = new byte[1024];
     private readonly ArrayBufferWriter<byte> _buffer = new();
@@ -53,6 +50,11 @@ public class SimpleJsonRpc : IAsyncDisposable
         Completion = _completionSource.Task;
     }
 
+    /// <summary>
+    /// Starts the listen task
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Method has been called multiple times.</exception>
+    /// <exception cref="ObjectDisposedException">The current instance has already been disposed.</exception>
     public void StartListening()
     {
         if (IsDisposed) throw new ObjectDisposedException(nameof(SimpleJsonRpc));
@@ -61,16 +63,39 @@ public class SimpleJsonRpc : IAsyncDisposable
         Task.Run(ListenAsync);
     }
 
-    public async Task<T> Request<T>(string methodName, object? param = null, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Submit a request. Task completes once the server's response gets processed, if the server never responds or
+    /// the response is malformed in a way that it can't be attributed to the request the task will never complete.
+    /// </summary>
+    /// <param name="methodName"> The method's name.</param>
+    /// <param name="param">An optional object that will be serialized as the request's "params" field.</param>
+    /// <param name="cancellationToken">The token to monitor for cancellation requests. Only response await can be canceled. The default value is <see cref="CancellationToken.None">None</see>.</param>
+    /// <exception cref="InvalidOperationException">Method has been called before <see cref="StartListening"/></exception>
+    /// <exception cref="NotSupportedException">There is no compatible JsonConverter for <paramref name="param"/> or its serializable members.</exception>
+    /// <exception cref="JsonRpcResponseException">The server returned an error.</exception>
+    /// <exception cref="JsonRpcInvalidResponseException">The server returned an invalid response.</exception>
+    /// <exception cref="OperationCanceledException">The cancellation token was canceled. This exception is stored into the returned task.</exception>
+    /// <exception cref="ObjectDisposedException">The current instance has already been disposed.</exception>
+    public async Task Request(string methodName, object? param = null, CancellationToken cancellationToken = default)
+    {
+        await Request<object>(methodName, param, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="Request(string, object, CancellationToken)" />
+    /// <typeparam name="TResult">Method's response type</typeparam>
+    /// <exception cref="NotSupportedException">There is no compatible JsonConverter for <typeparamref name="TResult"/> or its serializable members.</exception>
+    /// <exception cref="JsonException"><typeparamref name="TResult"/> is not compatible with the JSON.</exception>
+    public async Task<TResult> Request<TResult>(string methodName, object? param = null, CancellationToken cancellationToken = default)
     {
         if (IsDisposed) throw new ObjectDisposedException(nameof(SimpleJsonRpc));
         if (!IsStarted) throw new InvalidOperationException("Not listening yet, call StartListening() first");
         var id = Interlocked.Increment(ref _id);
-        PendingRequest<T> pendingRequest = new();
+        PendingRequest<TResult> pendingRequest = new();
         _requests.TryAdd(id, pendingRequest);
         try
         {
-            await SendRequest(methodName, param, id, cancellationToken).ConfigureAwait(false);
+            await SendRequest(methodName, param, id).ConfigureAwait(false);
+            cancellationToken.Register(() => pendingRequest.CompletionSource.TrySetCanceled(cancellationToken));
             return await pendingRequest.CompletionSource.Task.ConfigureAwait(false);
         }
         finally
@@ -79,11 +104,20 @@ public class SimpleJsonRpc : IAsyncDisposable
         }
     }
 
-    public async Task Notify(string methodName, object? param = null, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Submit a notification request. Task completes when the requests gets dispatched.
+    /// </summary>
+    /// <param name="methodName"> The method's name.</param>
+    /// <param name="param">An optional object that will be serialized as the request's "params" field.</param>
+    /// <exception cref="InvalidOperationException">Method has been called before <see cref="StartListening"/></exception>
+    /// <exception cref="NotSupportedException">There is no compatible JsonConverter for <paramref name="param"/> or its serializable members.</exception>
+    /// <exception cref="OperationCanceledException">The cancellation token was canceled. This exception is stored into the returned task.</exception>
+    /// <exception cref="ObjectDisposedException">The current instance has already been disposed.</exception>
+    public async Task Notify(string methodName, object? param = null)
     {
         if (IsDisposed) throw new ObjectDisposedException(nameof(SimpleJsonRpc));
         if (!IsStarted) throw new InvalidOperationException("Not listening yet, call StartListening() first");
-        await SendRequest(methodName, param, cts: cancellationToken).ConfigureAwait(false);
+        await SendRequest(methodName, param).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -107,10 +141,19 @@ public class SimpleJsonRpc : IAsyncDisposable
         if (parameters.Length > 1)
             throw new InvalidOperationException("Delegate must have 1 or 0 parameters");
         Type? paramsType = parameters.Length == 1 ? parameters[0].ParameterType : null;
-        _methods[methodName] = new() { Name = methodName, Delegate = @delegate, ParamsType = paramsType };
+        _methods[methodName] = new(methodName, @delegate, paramsType);
     }
 
-    public async ValueTask Shutdown(string reason = "")
+    /// <summary>
+    /// Stops listening, disposes the backing stream and faults all pending requests with <see cref="ObjectDisposedException"/>.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        GC.SuppressFinalize(this);
+        await Shutdown(JsonRpcShutdownReasonEnum.Disposed).ConfigureAwait(false);
+    }
+
+    protected async ValueTask Shutdown(JsonRpcShutdownReasonEnum reason, Exception? exception = null)
     {
         if (IsDisposed) return;
         IsDisposed = true;
@@ -122,43 +165,33 @@ public class SimpleJsonRpc : IAsyncDisposable
             request.SetException(new ObjectDisposedException(nameof(SimpleJsonRpc)));
         }
 
-        _completionSource.SetResult();
-
-        Disconnected?.Invoke(this, EventArgs.Empty);
+        _completionSource.SetResult(new JsonRpcShutdownReason(reason, exception));
     }
 
     protected async Task ListenAsync()
     {
-        while (!_cts.IsCancellationRequested)
+        try
         {
-            int read;
-            try
+            while (!_cts.IsCancellationRequested)
             {
-                read = await _readStream.ReadAsync(_readBuffer, _cts.Token).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                await Shutdown("Read exception").ConfigureAwait(false);
-                return;
-            }
+                int read = await _readStream.ReadAtLeastAsync(_readBuffer, 1, false, _cts.Token).ConfigureAwait(false);
 
-            if (read == 0)
-            {
-                await Shutdown("").ConfigureAwait(false);
-                return;
-            }
+                int startIndex = 0;
+                int index;
+                while (startIndex < read && (index = Array.IndexOf(_readBuffer, (byte)'\n', startIndex, read - startIndex)) >= 0)
+                {
+                    _buffer.Write(new ReadOnlySpan<byte>(_readBuffer, startIndex, index - startIndex));
+                    startIndex = index + 1;
+                    await HandleMessage(_buffer.WrittenMemory).ConfigureAwait(false);
+                    _buffer.Clear();
+                }
 
-            int startIndex = 0;
-            int index;
-            while (startIndex < read && (index = Array.IndexOf(_readBuffer, (byte)'\n', startIndex, read - startIndex)) >= 0)
-            {
-                _buffer.Write(new ReadOnlySpan<byte>(_readBuffer, startIndex, index - startIndex));
-                startIndex = index + 1;
-                await HandleMessage(_buffer.WrittenMemory).ConfigureAwait(false);
-                _buffer.Clear();
+                if (startIndex < read) _buffer.Write(new ReadOnlySpan<byte>(_readBuffer, startIndex, read - startIndex));
             }
-
-            if (startIndex < read) _buffer.Write(new ReadOnlySpan<byte>(_readBuffer, startIndex, read - startIndex));
+        }
+        catch (Exception ex)
+        {
+            await Shutdown(JsonRpcShutdownReasonEnum.ListeningError, ex).ConfigureAwait(false);
         }
     }
 
@@ -358,7 +391,7 @@ public class SimpleJsonRpc : IAsyncDisposable
         await Send(message, _cts.Token).ConfigureAwait(false);
     }
 
-    protected async Task SendRequest(string method, object? param, int? id = null, CancellationToken cts = default)
+    protected async Task SendRequest(string method, object? param, int? id = null)
     {
         var message = new JsonObject
         {
@@ -368,7 +401,7 @@ public class SimpleJsonRpc : IAsyncDisposable
         if (param != null) message["params"] = JsonSerializer.SerializeToNode(param);
         if (id != null) message["id"] = id;
 
-        await Send(message, cts).ConfigureAwait(false);
+        await Send(message, _cts.Token).ConfigureAwait(false);
     }
 
     protected async Task Send(JsonObject message, CancellationToken cts = default)
@@ -390,18 +423,12 @@ public class SimpleJsonRpc : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            await Shutdown("Write exception").ConfigureAwait(false);
+            await Shutdown(JsonRpcShutdownReasonEnum.WritingError, ex).ConfigureAwait(false);
             return;
         }
         finally
         {
             _writeLock.Release();
         }
-    }
-
-
-    public async ValueTask DisposeAsync()
-    {
-        await Shutdown("Disposed").ConfigureAwait(false);
     }
 }

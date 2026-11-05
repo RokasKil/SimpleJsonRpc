@@ -1,5 +1,4 @@
-﻿using System.Diagnostics.CodeAnalysis;
-using System.Text.Json.Serialization;
+﻿using System.Text.Json.Serialization;
 
 namespace SimpleJsonRpc.Data;
 
@@ -10,9 +9,9 @@ public record JsonRpcError(
     string Message
 );
 
-public record JsonRpcError<T>(
+public record JsonRpcError<TData>(
     int Code,
     string Message,
     [property: JsonPropertyName("data")]
-    T Data
+    TData Data
 ) : JsonRpcError(Code, Message);
